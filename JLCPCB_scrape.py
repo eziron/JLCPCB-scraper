@@ -1,22 +1,11 @@
 import requests
-import json
 import time
-import unicodedata
+
 import pandas as pd
 import numpy as np
 
+from util import *
 
-def strip_accents_and_lower(text: str) -> str:
-    """
-    Elimina diacríticos (tildes) y pasa la cadena a minúsculas.
-    """
-    if not text:
-        return ""
-    text_nfd = unicodedata.normalize("NFD", text)
-    text_without_accents = "".join(
-        c for c in text_nfd if unicodedata.category(c) != "Mn"
-    )
-    return text_without_accents.lower()
 
 
 class JLCPCB_Scrape:
@@ -51,15 +40,10 @@ class JLCPCB_Scrape:
         # DataFrame donde almacenaremos todos los componentes.
         self._df = None
 
-        # Variable para almacenar metadatos de la descarga.
-        self.metadata = {}
-
-        # 1) URL por defecto
         if url is None:
             url = "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList/v2"
         self.url = url
 
-        # 2) Definir user-agent y referer por defecto, si no se especifican.
         if user_agent is None:
             user_agent = (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -68,7 +52,6 @@ class JLCPCB_Scrape:
         if referer is None:
             referer = "https://jlcpcb.com/parts/all-electronic-components"
 
-        # 3) Construir cabeceras mínimas necesarias.
         self.headers = {
             "authority": "jlcpcb.com",
             "method": "POST",
@@ -82,22 +65,14 @@ class JLCPCB_Scrape:
             "user-agent": user_agent,
         }
 
-        # 4) Agregar parámetros opcionales (si no son None).
         if cookie is not None:
             self.headers["cookie"] = cookie
-
         if secretkey is not None:
             self.headers["secretkey"] = secretkey
-
         if xsrf_token is not None:
             self.headers["x-xsrf-token"] = xsrf_token
 
     def _print_progress(self, current, total, bar_length=50):
-        """
-        Método interno para imprimir una barra de progreso simple en la terminal.
-        current: página actual
-        total  : total de páginas
-        """
         fraction = current / total if total else 1
         filled = int(bar_length * fraction)
         bar = "█" * filled + "-" * (bar_length - filled)
@@ -108,357 +83,298 @@ class JLCPCB_Scrape:
         if current == total:
             print()
 
-    def get_jlcpcb_total_count(
+    def JLCPCB_API_query(
         self,
         keyword=None,
+        currentPage=1,
+        pageSize=25,
+        presaleType="stock",
+        pcbAType=None,
+        photo=None,
+        dateSheet=None,
+        searchType=2,
         componentLibraryType=None,
-        preferredComponentFlag=None,
+        sortASC=None,
+        sortMode=None,
         stockFlag=True,
         stockSort=None,
+        preferredComponentFlag=None,
         startStockNumber=None,
         endStockNumber=None,
-        firstSortName=None,
-        secondSortName=None,
-        componentBrand=None,
-        componentSpecification=None,
-        componentAttributes=None,
-        sortASC=None,  # "ASC" o "DESC"
-        sortMode=None,  # "STOCK_SORT" o "PRICE_SORT"
-        pageSize=25,
         searchSource="search",
-    ) -> int:
+    ) -> dict:
         """
-        Retorna la cantidad total de componentes encontrados según los parámetros indicados,
-        sin descargar todas las páginas.
+        Realiza una consulta directa a la API de JLCPCB con un payload detallado.
+
+        Args:
+            --- Búsqueda y Paginación ---
+            keyword (str, optional): Término de búsqueda principal (MPN, descripción, etc.).
+            currentPage (int, optional): Número de la página de resultados. Defaults to 1.
+            pageSize (int, optional): Cantidad de resultados por página (máx 100). Defaults to 25.
+            searchSource (str, optional): Origen de la búsqueda, usualmente "search".
+
+            --- Filtros Principales (Nuevos) ---
+            presaleType (str, optional): Tipo de disponibilidad del componente.
+                - "stock": (Default) Partes en stock.
+                - "buy": Partes bajo pre-orden.
+                - "post": Partes consignadas.
+            pcbAType (int, optional): Filtra por el tipo de tarifa de ensamblaje (PCBA).
+                - 1: "Economic"
+                - 2: "Standard"
+                - 3: "Economic" y "Standard"
+                - None: (Default) Sin filtro.
+            photo (bool, optional): Si es True, filtra componentes que tienen foto. Defaults to None.
+            dateSheet (bool, optional): Si es True, filtra componentes con datasheet. (Nótese el typo en el nombre). Defaults to None.
+            searchType (int, optional): Tipo de búsqueda interna. Usar 2 para obtener listas de componentes. Defaults to 2.
+
+            --- Filtros Originales y Ordenación ---
+            componentLibraryType (str, optional): Filtra por tipo de librería.
+                - "base": Componentes de la librería básica.
+                - "expand": Componentes de la librería extendida.
+                - None: (Default) Ambas.
+            preferredComponentFlag (bool, optional): Filtra por componentes "Preferidos".
+                - True: Solo preferidos.
+                - False: Solo no preferidos.
+                - None: (Default) Sin filtro.
+            stockFlag (bool, optional): Si es True, muestra solo componentes con stock > 0. Defaults to True.
+            sortMode (str, optional): Criterio principal de ordenación.
+                - "STOCK_SORT": Ordenar por cantidad en stock.
+                - "PRICE_SORT": Ordenar por precio.
+                - None: (Default) Ordenar por relevancia.
+            sortASC (str, optional): Dirección de la ordenación ("ASC" o "DESC").
+            stockSort (str, optional): Parámetro de ordenación de stock, usualmente se deja en None.
+            startStockNumber (int, optional): Cantidad mínima de stock para filtrar.
+            endStockNumber (int, optional): Cantidad máxima de stock para filtrar.
+
+        Returns:
+            dict: La respuesta JSON de la API o None si hay un error.
         """
         payload = {
-            "pageSize": pageSize,
             "keyword": keyword,
+            "currentPage": currentPage,
+            "pageSize": pageSize,
+            "searchSource": searchSource,
+            "presaleType": presaleType,
+            "searchType": searchType,
+            "pcbAType": pcbAType,
             "componentLibraryType": componentLibraryType,
             "preferredComponentFlag": preferredComponentFlag,
             "stockFlag": stockFlag,
             "stockSort": stockSort,
             "startStockNumber": startStockNumber,
             "endStockNumber": endStockNumber,
-            "firstSortName": firstSortName,
-            "secondSortName": secondSortName,
-            "componentBrand": componentBrand,
-            "componentSpecification": componentSpecification,
-            "componentAttributes": componentAttributes or [],
-            "searchSource": searchSource,
-            "currentPage": 1,
             "sortASC": sortASC,
             "sortMode": sortMode,
+            # Parámetros que suelen estar vacíos en búsquedas generales
+            "firstSortName": "",
+            "secondSortName": "",
+            "componentBrandList": [],
+            "componentSpecificationList": [],
+            "componentAttributeList": [],
+            "firstSortNameList": [],
         }
 
-        resp = requests.post(self.url, headers=self.headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"[get_jlcpcb_total_count] Respuesta HTTP no exitosa: {resp.status_code}"
-            )
+        # Añadir filtros booleanos solo si son True, como hace el navegador
+        if photo:
+            payload['photo'] = True
+        if dateSheet:
+            payload['dateSheet'] = True
 
-        data_json = resp.json()
-        if data_json.get("code") != 200:
-            raise RuntimeError(
-                f"[get_jlcpcb_total_count] code != 200. Mensaje: {data_json.get('message','Desconocido')}"
-            )
+        try:
+            resp = requests.post(self.url, headers=self.headers, json=payload)
+            resp.raise_for_status()  # Lanza una excepción para errores HTTP (4xx o 5xx)
+            data_json = resp.json()
+            if data_json.get("code") == 200:
+                return data_json
+            else:
+                print(f"Error en la respuesta de la API: {data_json.get('msg', 'Sin mensaje')}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"Error en la petición a la API: {e}")
+            return None
 
-        page_info = data_json["data"]["componentPageInfo"]
-        total = page_info.get("total", 0)
-        return total
+    def get_jlcpcb_total_count(self, **kwargs) -> int:
+        """
+        Obtiene el número total de componentes para una consulta dada.
+        Acepta los mismos argumentos de filtrado que get_jlcpcb_components.
+        """
+        # Se establece una página y tamaño pequeños para optimizar
+        kwargs['currentPage'] = 1
+        kwargs['pageSize'] = 1
+
+        data_json = self.JLCPCB_API_query(**kwargs)
+        if data_json is None:
+            return 0
+
+        page_info = data_json.get("data", {}).get("componentPageInfo", {})
+        return page_info.get("total", 0)
 
     def get_jlcpcb_components(
         self,
         keyword=None,
+        pageSize=100,
+        # --- Nuevos Parámetros con valores por defecto ---
+        presaleType="stock",
+        pcbAType=None,
+        photo=None,
+        dateSheet=None,
+        # --- Parámetros Originales ---
         componentLibraryType=None,
-        preferredComponentFlag=None,
+        sortASC=None,
+        sortMode=None,
         stockFlag=True,
         stockSort=None,
+        preferredComponentFlag=None,
         startStockNumber=None,
         endStockNumber=None,
-        firstSortName=None,
-        secondSortName=None,
-        componentBrand=None,
-        componentSpecification=None,
-        componentAttributes=None,
-        sortASC=None,  # "ASC" o "DESC"
-        sortMode=None,  # "STOCK_SORT" o "PRICE_SORT"
-        pageSize=25,
         searchSource="search",
+        progress_mode: str = "rich",
+        progress_args: dict = None,
     ) -> pd.DataFrame:
         """
-        Descarga la lista completa de componentes desde la API de JLCPCB
-        (todas las páginas) y los almacena en un DataFrame (self._df).
-        También retorna dicho DataFrame.
+        Descarga la lista completa de componentes desde la API de JLCPCB.
+        Acepta todos los parámetros de filtrado y los pasa a la API.
         """
-
-        # Petición inicial (página 1) para extraer metadatos
-        base_payload = {
-            "pageSize": pageSize,
-            "keyword": keyword,
-            "componentLibraryType": componentLibraryType,
-            "preferredComponentFlag": preferredComponentFlag,
-            "stockFlag": stockFlag,
-            "stockSort": stockSort,
-            "startStockNumber": startStockNumber,
-            "endStockNumber": endStockNumber,
-            "firstSortName": firstSortName,
-            "secondSortName": secondSortName,
-            "componentBrand": componentBrand,
-            "componentSpecification": componentSpecification,
-            "componentAttributes": componentAttributes or [],
-            "searchSource": searchSource,
-            "sortASC": sortASC,
-            "sortMode": sortMode,
+        current_page = 1
+        query_params = {
+            "keyword": keyword, "pageSize": pageSize, "presaleType": presaleType,
+            "pcbAType": pcbAType, "photo": photo, "dateSheet": dateSheet,
+            "componentLibraryType": componentLibraryType, "sortASC": sortASC, "sortMode": sortMode,
+            "stockFlag": stockFlag, "stockSort": stockSort,
+            "preferredComponentFlag": preferredComponentFlag, "startStockNumber": startStockNumber,
+            "endStockNumber": endStockNumber, "searchSource": searchSource
         }
 
-        current_page = 1
-        payload = base_payload.copy()
-        payload["currentPage"] = current_page
-
-        resp = requests.post(self.url, headers=self.headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"[get_jlcpcb_components] Error HTTP {resp.status_code} en página 1."
-            )
-
-        data_json = resp.json()
-        if data_json.get("code") != 200:
-            raise RuntimeError(
-                f"[get_jlcpcb_components] code != 200 en página 1. Mensaje: {data_json.get('message','Desconocido')}"
-            )
+        data_json = self.JLCPCB_API_query(currentPage=current_page, **query_params)
+        if data_json is None:
+            return None
 
         page_info = data_json["data"]["componentPageInfo"]
         pages = page_info.get("pages", 1)
-        total = page_info.get("total", 0)
-        page_size = page_info.get("pageSize", pageSize)
-
         raw_components = page_info.get("list", [])
-        self._print_progress(current_page, pages)
 
-        # 2) Iterar por las demás páginas
-        for p in range(2, pages + 1):
-            payload["currentPage"] = p
-            r = requests.post(self.url, headers=self.headers, json=payload)
-            if r.status_code != 200:
-                print(
-                    f"[get_jlcpcb_components] Advertencia: HTTP {r.status_code} al pedir la página {p}. Se detiene."
-                )
-                break
+        # Configuración de barra de progreso
+        rich_progress = None
+        if progress_mode == "rich" and progress_args:
+            rich_progress = progress_args.get("progress")
+            rich_task_id = progress_args.get("task_id")
+            if rich_progress and rich_task_id is not None:
+                rich_progress.update(rich_task_id, total=pages, completed=1)
+                rich_progress.start_task(rich_task_id)
+            else:
+                progress_mode = "terminal" # Fallback a terminal
+        
+        if progress_mode == "terminal":
+            self._print_progress(current_page, pages)
 
-            data_p = r.json()
-            if data_p.get("code") != 200:
-                print(
-                    f"[get_jlcpcb_components] Advertencia: code != 200 en página {p}. Se detiene."
-                )
-                print(data_json)
-                break
+        # Descarga de páginas restantes
+        if pages > 1:
+            for p in range(2, pages + 1):
+                data_p = self.JLCPCB_API_query(currentPage=p, **query_params)
+                
+                if data_p is None:
+                    break
+                
+                page_info_p = data_p.get("data", {}).get("componentPageInfo")
+                if page_info_p is None:
+                    break
+                
+                raw_components.extend(page_info_p.get("list", []))
 
-            page_info_p = data_p.get("data", {}).get("componentPageInfo")
-            if page_info_p is None:
-                print(f"[get_jlcpcb_components] page_info_p es None en página {p}")
-                break
 
-            raw_components.extend(page_info_p.get("list", []))
-            self._print_progress(p, pages)
-            time.sleep(0.2)
+                # Actualizar progreso
+                if progress_mode == 'rich':
+                    try:
+                        rich_progress.update(rich_task_id, advance=1)
+                    except Exception as e:
+                        print(f"Error actualizando progreso: {e}")
+                        progress_mode = 'terminal'
+                elif progress_mode == 'terminal':
+                    self._print_progress(p, pages)
+                
+                time.sleep(0.1)
 
-        # Convertir a DataFrame
-        df = pd.DataFrame(raw_components)
+        # --- Procesamiento de datos en DataFrame ---
+        if not raw_components:
+            self._df = pd.DataFrame()
+            return self._df
+            
+        df_raw = pd.DataFrame(raw_components)
 
-        # Mapeo de campos [nombre_original] -> [nuevo_nombre]
-        # Observa que aquí invertimos el dict que tenías en tu código para renombrar.
         rename_map = {
-            "componentCode": "JLCPCB Part",
-            "componentId": "Component ID",
-            "componentName": "Component Name",
-            "componentModelEn": "Model",
-            "componentTypeEn": "Category",
-            "firstSortName": "Primary Classification",
-            "secondSortName": "Secondary Classification",
-            "componentSpecificationEn": "Package",
-            "describe": "Description",
-            "componentBrandEn": "Manufacturer",
-            "stockCount": "Stock Count",
-            "componentPrices": "Price Tiers",
-            "componentLibraryType": "Component Type",
-            "preferredComponentFlag": "Preferred Component",
-            "componentProductType": "Product Type",
-            "allowPostFlag": "Allows Purchase",
-            "componentAlternativesCode": "Alternatives",
-            "lcscGoodsUrl": "Product Page URL",
-            "dataManualUrl": "Datasheet URL",
+            "componentModelEn": "Model", "componentBrandEn": "Manufacturer",
+            "componentCode": "JLCPCB Part", "attributes": "Specifications",
+            "componentSpecificationEn": "Package", "stockCount": "Stock",
+            "componentPrices": "Price Tiers", "leastPatchNumber": "Min Assembly Qty",
+            "dataManualUrl": "Datasheet URL", "allowPostFlag": "Assembly Available",
+            "componentLibraryType": "Library Type", "preferredComponentFlag": "Preferred",
+            "componentTypeEn": "Category", "describe": "Description",
+            "minPurchaseNum": "Min Purchase Qty", "encapsulationNumber": "Reel Quantity",
+            "lcscGoodsUrl": "Product URL", "componentId": "Component ID",
+            "componentName": "Component Name", "erpComponentName": "Short Description",
         }
 
-        # Renombramos las columnas existentes
-        common_cols = set(rename_map.keys()).intersection(df.columns)
-        rename_dict = {k: rename_map[k] for k in common_cols}
-        df.rename(columns=rename_dict, inplace=True)
+        original_cols_to_keep = [col for col in rename_map.keys() if col in df_raw.columns]
+        if not original_cols_to_keep:
+            self._df = pd.DataFrame()
+            return None
 
-        # Guardar el DataFrame en la instancia
-        self._df = df
+        df_processed = df_raw[original_cols_to_keep].copy()
+        rename_dict = {orig: new for orig, new in rename_map.items() if orig in df_processed.columns}
+        df_processed.rename(columns=rename_dict, inplace=True)
 
-        # Guardamos metadata
-        self.metadata = {
-            "payload_parameters": base_payload,
-            "pages": pages,
-            "total": len(df),
-            "pageSize": page_size,
-        }
+        if "Assembly Available" in df_processed.columns:
+            assembly_bool_map = {True: True, "true": True, 1: True, False: False, "false": False, 0: False}
+            assembly_available_bool = df_processed["Assembly Available"].map(assembly_bool_map).fillna(False)
+            df_processed = df_processed[assembly_available_bool].copy()
+            df_processed.drop(columns=["Assembly Available"], inplace=True)
 
+        if "Library Type" in df_processed.columns and "Preferred" in df_processed.columns:
+            cond_base = df_processed["Library Type"] == "base"
+            preferred_bool_map = {True: True, "true": True, 1: True, False: False, "false": False, 0: False}
+            preferred_bool = df_processed["Preferred"].map(preferred_bool_map).fillna(False)
+            cond_expand_pref = (df_processed["Library Type"] == "expand") & (preferred_bool == True)
+            cond_expand_not_pref = (df_processed["Library Type"] == "expand") & (preferred_bool == False)
+            choices = [0, 1, 2]
+            df_processed["Preference Level"] = np.select([cond_base, cond_expand_pref, cond_expand_not_pref], choices, default=2)
+
+        for col in df_processed.columns:
+            if df_processed[col].dtype == "object":
+                first_non_null = df_processed[col].dropna().iloc[0] if not df_processed[col].dropna().empty else None
+                if isinstance(first_non_null, str):
+                    df_processed[col] = df_processed[col].apply(clean_text_value)
+                elif col == "Specifications" and isinstance(first_non_null, list):
+                    def clean_specs(spec_list):
+                        if not isinstance(spec_list, list): return spec_list
+                        return [{clean_text_value(k): clean_text_value(v) for k, v in spec_dict.items()} if isinstance(spec_dict, dict) else spec_dict for spec_dict in spec_list]
+                    df_processed[col] = df_processed[col].apply(clean_specs)
+        
+        self._df = df_processed
         return self._df
 
-    def load_json_from_file(self, filename: str):
-        """
-        Carga un archivo JSON (exportado previamente)
-        y lo asigna a self._df para reutilizarlo en las búsquedas.
-        """
-        with open(filename, "r", encoding="utf-8") as f:
-            data = json.load(f)
 
-        # Asumimos que el JSON tiene la estructura: {"metadata": {...}, "components": [...]} 
-        # según tu código original. Ajustamos para cargar en un DataFrame.
-        if "components" in data:
-            df = pd.DataFrame(data["components"])
-            self._df = df
-            self.metadata = data.get("metadata", {})
-        else:
-            # En caso de que el JSON sea directamente una lista de componentes
-            self._df = pd.DataFrame(data)
-            self.metadata = {}
 
-    def _get_min_price(self, price_tiers) -> float:
-        """
-        Retorna el menor precio dentro de 'Price Tiers' de un componente,
-        o un valor grande (999999) si no existe.
-        """
-        if not isinstance(price_tiers, list) or len(price_tiers) == 0:
-            return 999999
-        min_price = 999999
-        for tier in price_tiers:
-            if tier and isinstance(tier, dict):
-                p = tier.get("productPrice", 999999)
-                if p < min_price:
-                    min_price = p
-        return min_price
+if __name__ == "__main__":
+    # Ejemplo de uso
+    api = JLCPCB_Scrape()
 
-    def search_components(
-        self,
-        query_text: str = None,
-        component_type: str = None,  # 'base', 'expand', etc.
-        preferred: bool = None,      # True/False
-        allows_purchase: bool = None,# True/False
-        min_stock: int = None,       # stock mínimo
-    ) -> pd.DataFrame:
-        """
-        Realiza la búsqueda y filtrado sobre self._df (DataFrame).
+    print("--- Ejemplo 1: Consulta básica a la API (primeros 5 componentes en stock) ---")
+    res = api.JLCPCB_API_query(pageSize=5, stockFlag=True)
+    if res:
+        print("Consulta exitosa:\n")
+        # Imprime solo algunos campos clave para mayor claridad
+        for item in res["data"]["componentPageInfo"]["list"]:
+            print(f"  - {item.get('componentModelEn', 'N/A')} ({item.get('componentCode', 'N/A')})")
+        print("\n" + "="*50 + "\n")
+    else:
+        print("Error en la consulta.")
 
-        Filtros:
-           - query_text: busca en varios campos (sin tildes, case-insensitive).
-           - component_type: Filtra por "Component Type" => 'base', 'expand', etc.
-           - preferred: Filtra por "Preferred Component" => True/False
-           - allows_purchase: Filtra por "Allows Purchase" => True/False
-           - min_stock: Filtra componentes con "Stock Count" >= min_stock
-
-        Orden final (ascendente):
-          1) stock>0 primero  (is_stock_zero = 0 para stock>0, 1 para stock=0)
-          2) "Component Type": 'base' primero (is_expand = 0 si base, 1 si no-base)
-          3) "Preferred Component": True primero (is_not_preferred=0 si True, 1 si False)
-          4) precio asc (min_price)
-
-        Retorna un DataFrame con los resultados filtrados y ordenados.
-        """
-
-        if self._df is None or self._df.empty:
-            print("[search_components] No hay datos en self._df. Carga u obtiene datos primero.")
-            return pd.DataFrame()
-
-        df = self._df.copy()
-
-        # ---- 1) APLICACIÓN DE FILTROS ----
-
-        # Filtro por component_type
-        if component_type is not None:
-            df = df[df["Component Type"] == component_type]
-
-        # Filtro por preferred
-        if preferred is not None:
-            df = df[df["Preferred Component"] == preferred]
-
-        # Filtro por allows_purchase
-        if allows_purchase is not None:
-            df = df[df["Allows Purchase"] == allows_purchase]
-
-        # Filtro por min_stock
-        if min_stock is not None:
-            df = df[df["Stock Count"].fillna(0) >= min_stock]
-
-        # Filtro texto: se buscan todas las palabras en varios campos
-        if query_text:
-            query_words = [
-                strip_accents_and_lower(word) for word in query_text.split() if word.strip()
-            ]
-            if query_words:
-                text_fields = [
-                    "JLCPCB Part",
-                    "Component Name",
-                    "Model",
-                    "Category",
-                    "Primary Classification",
-                    "Secondary Classification",
-                    "Package",
-                    "Description",
-                    "Manufacturer",
-                ]
-                # Asegurarnos de que existan esas columnas en df
-                text_fields = [f for f in text_fields if f in df.columns]
-
-                # Creamos una sola columna con la concatenación de texto normalizado
-                def normalize_row(row):
-                    vals = []
-                    for col in text_fields:
-                        val = row[col] if pd.notnull(row[col]) else ""
-                        vals.append(strip_accents_and_lower(str(val)))
-                    return " ".join(vals)
-
-                # Generamos la columna 'search_concat'
-                df["search_concat"] = df.apply(normalize_row, axis=1)
-
-                # Para filtrar, requerimos que cada palabra de query_words esté presente
-                for w in query_words:
-                    df = df[df["search_concat"].str.contains(w)]
-
-                # Eliminamos la columna auxiliar
-                df.drop(columns=["search_concat"], inplace=True)
-
-        # ---- 2) ORDENAMIENTO ----
-        # Definimos columnas auxiliares para replicar la lógica:
-        # stock>0 => is_stock_zero=0, si stock=0 => 1
-        df["is_stock_zero"] = np.where(df["Stock Count"].fillna(0) > 0, 0, 1)
-
-        # 'base' => is_expand=0, caso contrario => 1
-        # OJO: si no existe la columna "Component Type", se asume 1
-        df["is_expand"] = np.where(df["Component Type"] == "base", 0, 1)
-
-        # True => is_not_preferred=0, False => 1
-        df["is_not_preferred"] = np.where(df["Preferred Component"] == True, 0, 1)
-
-        # min_price => calculamos con la misma lógica de _get_min_price
-        # (si en tu DataFrame "Price Tiers" ya tiene la estructura, podrías vectorizar;
-        #  por simplicidad hacemos un apply para cada fila).
-        df["min_price"] = df["Price Tiers"].apply(self._get_min_price)
-
-        # Ordenamos con sort_values ascendente en todas las columnas
-        df.sort_values(
-            by=["is_stock_zero", "is_expand", "is_not_preferred", "min_price"],
-            ascending=[True, True, True, True],
-            inplace=True
-        )
-
-        # Limpiamos columnas auxiliares antes de retornar
-        df.drop(
-            columns=["is_stock_zero", "is_expand", "is_not_preferred", "min_price"],
-            inplace=True
-        )
-
-        return df
+    print("--- Ejemplo 2: Descargar componentes 'Pre-order' con datasheet ---")
+    # Usando los nuevos parámetros: presaleType="buy" y dateSheet=True
+    df = api.get_jlcpcb_components(
+        keyword="stm32",
+        presaleType="buy",  # Busca en "Pre-order Parts"
+        dateSheet=True,     # Filtra los que tienen datasheet
+        pageSize=50,        # Limita la descarga para el ejemplo
+        progress_mode="terminal",
+    )
